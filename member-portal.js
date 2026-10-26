@@ -32,10 +32,13 @@
   async function passwordMembers(){
     const {members}=await api('/admin/password-members');$('passwordAdmin').hidden=false;
     $('passwordMembers').replaceChildren();
-    for(const member of members){const row=node('p'),button=node('button',member.passwordSet?'Password Reset':'অস্থায়ী Password তৈরি','subtle');button.type='button';
-      button.addEventListener('click',async()=>{if(!confirm(member.memberId+'-এর password তৈরি/reset করবেন? পুরোনো session বন্ধ হবে।'))return;button.disabled=true;button.textContent='Password তৈরি হচ্ছে…';$('temporaryPassword').textContent='Password তৈরি হচ্ছে…';$('hideTemporary').hidden=true;
-        try{const result=await api('/admin/reset-password',{method:'POST',body:JSON.stringify({identityId:member.identityId})});$('temporaryPassword').textContent=result.memberId+' · অস্থায়ী password: '+result.temporaryPassword+' · মেয়াদ ২৪ ঘণ্টা। ব্যক্তিগতভাবে দিন।';$('hideTemporary').hidden=false;setTimeout(()=>{$('temporaryPassword').textContent='';$('hideTemporary').hidden=true},120000);button.textContent='Password Reset'}catch(e){$('temporaryPassword').textContent=e.message;notice(e.message)}finally{button.disabled=false;button.textContent=member.passwordSet?'Password Reset':'অস্থায়ী Password তৈরি'}});
-      row.append(node('span',member.memberId+' · '+member.fullName+' '),button);$('passwordMembers').append(row);
+    for(const member of members){const row=node('form'),label=node('label',member.memberId+' · '+member.fullName+' '),password=node('input'),confirmation=node('input'),button=node('button',member.passwordSet?'Password Reset':'Password সেট করুন','subtle'),status=node('p');
+      password.type=confirmation.type='password';password.required=confirmation.required=true;password.minLength=confirmation.minLength=4;password.maxLength=confirmation.maxLength=128;password.autocomplete=confirmation.autocomplete='new-password';
+      password.placeholder='নিজে password লিখুন (কমপক্ষে ৪ অক্ষর)';confirmation.placeholder='Password আবার লিখুন';password.setAttribute('aria-label',member.memberId+' নতুন password');confirmation.setAttribute('aria-label',member.memberId+' password নিশ্চিত করুন');button.type='submit';status.setAttribute('role','status');
+      row.addEventListener('submit',async event=>{event.preventDefault();if(password.value!==confirmation.value){status.textContent='Password দুটি মেলেনি।';return}if(!row.reportValidity())return;if(!confirm(member.memberId+'-এর password সেট/reset করবেন? পুরোনো session বন্ধ হবে।'))return;
+        button.disabled=true;status.textContent='Password সংরক্ষণ হচ্ছে…';
+        try{await api('/admin/reset-password',{method:'POST',body:JSON.stringify({identityId:member.identityId,password:password.value})});password.value=confirmation.value='';member.passwordSet=true;status.textContent=member.memberId+'-এর password সেট হয়েছে। ২৪ ঘণ্টার মধ্যে প্রথম login করে সদস্যকে password বদলাতে হবে।'}catch(e){status.textContent=e.message;notice(e.message)}finally{button.disabled=false;button.textContent=member.passwordSet?'Password Reset':'Password সেট করুন'}});
+      row.append(label,password,confirmation,button,status);$('passwordMembers').append(row);
     }
   }
   $('hideTemporary').addEventListener('click',()=>{$('temporaryPassword').textContent='';$('hideTemporary').hidden=true});

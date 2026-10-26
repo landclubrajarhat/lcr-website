@@ -126,7 +126,7 @@ export async function handleRequest(request,env,{verifyIdentity=verifyGoogle}={}
     if(path==='/auth/change-password'&&request.method==='POST'){
       if(!passwordEnabled)fail(404,'Password Login চালু নেই।');
       await rate(db,'password-change:'+user.id,5,900);const data=await body(request);
-      if(!validPassword(data.newPassword)||data.newPassword===data.currentPassword)fail(400,'নতুন আলাদা password ১৫–১২৮ অক্ষরের হতে হবে।');
+      if(!validPassword(data.newPassword)||data.newPassword===data.currentPassword)fail(400,'নতুন আলাদা password ৪–১২৮ অক্ষরের হতে হবে।');
       const old=await db.prepare('SELECT * FROM member_passwords WHERE identity_id=?').bind(user.id).first();
       if(!await verifyPassword(data.currentPassword,old?.password_hash)||!old||old.must_change&&old.temporary_expires<=now())fail(401,'বর্তমান password সঠিক নয় অথবা মেয়াদ শেষ।');
       const encoded=await hashPassword(data.newPassword);
@@ -166,7 +166,8 @@ export async function handleRequest(request,env,{verifyIdentity=verifyGoogle}={}
       if(typeof data.identityId!=='string'||data.identityId.length>100)fail(400,'সদস্য নির্বাচন করুন।');
       const target=await db.prepare("SELECT id,member_id FROM identities WHERE id=? AND role='member' AND active=1").bind(data.identityId).first();
       if(!target)fail(404,'সদস্য পাওয়া যায়নি।');
-      const temporaryPassword=randomToken().slice(0,24);let encoded;
+      if(!validPassword(data.password))fail(400,'Password কমপক্ষে ৪ এবং সর্বোচ্চ ১২৮ অক্ষরের হতে হবে।');
+      const temporaryPassword=data.password;let encoded;
       try{encoded=await hashPassword(temporaryPassword)}catch(error){
         // These fixed categories disclose no password, salt, hash or raw exception.
         const detail=String(error?.message||'');
@@ -179,7 +180,7 @@ export async function handleRequest(request,env,{verifyIdentity=verifyGoogle}={}
       ])}catch{
         fail(503,'RESET_STORAGE_FAILED: Password সংরক্ষণ হয়নি। Database table ও trigger পরীক্ষা প্রয়োজন।');
       }
-      return json({memberId:target.member_id,temporaryPassword,expiresInHours:24});
+      return json({memberId:target.member_id,ok:true,expiresInHours:24});
     }
     const review=path.match(/^\/admin\/submissions\/([a-f0-9-]{36})$/);
     if(review&&request.method==='POST'){

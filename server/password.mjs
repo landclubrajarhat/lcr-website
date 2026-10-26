@@ -5,8 +5,8 @@ const parameters={N:16384,r:8,p:5,maxmem:32*1024*1024};
 const hex=key=>Array.from(new Uint8Array(key),b=>b.toString(16).padStart(2,'0')).join('');
 const derive=(password,salt)=>new Promise((resolve,reject)=>scrypt(password,salt,32,parameters,(error,key)=>error?reject(error):resolve(hex(key))));
 const legacy=(password,salt)=>new Promise((resolve,reject)=>pbkdf2(password,salt,600000,32,'sha256',(error,key)=>error?reject(error):resolve(hex(key))));
-export function validPassword(value){return typeof value==='string'&&[...value].length>=15&&[...value].length<=128}
-export async function hashPassword(password){if(!validPassword(password))throw new Error('Password must contain 15–128 characters');const salt=randomToken();return `scrypt$16384$8$5$${salt}$${await derive(password,salt)}`}
+export function validPassword(value){return typeof value==='string'&&[...value].length>=4&&[...value].length<=128}
+export async function hashPassword(password){if(!validPassword(password))throw new Error('Password must contain 4–128 characters');const salt=randomToken();return `scrypt$16384$8$5$${salt}$${await derive(password,salt)}`}
 export async function verifyPassword(password,encoded){
   if(typeof password!=='string'||[...password].length>128)return false;
   const parts=(encoded||'').split('$');

@@ -12,27 +12,27 @@ async function setup(){const db=database(),env={LCR_DB:db,MEMBER_PORTAL_ENABLED:
  const call=(path,data,session='',csrf='',foreign=false)=>handleRequest(new Request(origin+'/api'+path,{method:data===undefined?'GET':'POST',headers:{'Content-Type':'application/json',Origin:foreign?'https://evil.invalid':origin,Cookie:'__Host-lcr-session='+session,'X-LCR-CSRF':csrf},...(data===undefined?{}:{body:JSON.stringify(data)})}),env);
  return {db,env,call,admin:token};}
 const tokenOf=r=>r.headers.get('Set-Cookie').split(';')[0].split('=')[1];
-test('password hashes use unique salt, verify correctly, reject malformed and long inputs',async()=>{const p='A long secret passphrase 123';const a=await hashPassword(p),b=await hashPassword(p);assert.notEqual(a,b);assert(a.startsWith('scrypt$16384$8$5$'));assert(await verifyPassword(p,a));assert(!await verifyPassword('wrong',a));assert(!await verifyPassword(p,'invalid'));assert(!await verifyPassword('a'.repeat(129),a));await assert.rejects(hashPassword('short'))});
+test('password hashes use unique salt, verify correctly, reject malformed and long inputs',async()=>{const p='A long secret passphrase 123';const a=await hashPassword(p),b=await hashPassword(p);assert.notEqual(a,b);assert(a.startsWith('scrypt$16384$8$5$'));assert(await verifyPassword(p,a));assert(!await verifyPassword('wrong',a));assert(!await verifyPassword(p,'invalid'));assert(!await verifyPassword('a'.repeat(129),a));await assert.rejects(hashPassword('123'))});
 test('admin-only reset -> forced change -> own profile -> reset revokes sessions; Google is optional',async()=>{
  const {db,call,admin}=await setup();const list=await call('/admin/password-members',undefined,admin);assert.equal(list.status,200);assert.equal((await list.json()).members[0].memberId,'LCR-TEST-001');
- assert.equal((await call('/admin/reset-password',{identityId:'member'})).status,401);
- assert.equal((await call('/admin/reset-password',{identityId:'member'},admin,'bad')).status,403);
- const reset=await call('/admin/reset-password',{identityId:'member'},admin,'admin-csrf');assert.equal(reset.status,200);const {temporaryPassword}=await reset.json();
+ assert.equal((await call('/admin/reset-password',{identityId:'member',password:'4826'})).status,401);
+ assert.equal((await call('/admin/reset-password',{identityId:'member',password:'4826'},admin,'bad')).status,403);
+ const reset=await call('/admin/reset-password',{identityId:'member',password:'4826'},admin,'admin-csrf');assert.equal(reset.status,200);assert.equal((await reset.json()).temporaryPassword,undefined);const temporaryPassword='4826';
  assert(!db.sql.prepare('SELECT password_hash FROM member_passwords').get().password_hash.includes(temporaryPassword));
  assert.equal((await call('/auth/password',{memberId:'LCR-TEST-001',password:'bad'})).status,401);
  assert.equal((await call('/auth/password',{memberId:'LCR-TEST-001',password:temporaryPassword},'','',true)).status,403);
  const login=await call('/auth/password',{memberId:'lcr-test-001',password:temporaryPassword});assert.equal(login.status,200);const session=tokenOf(login),me=await (await call('/me',undefined,session)).json();assert(me.mustChangePassword);assert.equal(me.profile,null);
  assert.equal((await call('/me/photo',{},session,me.csrf)).status,403);
  assert.equal((await call('/admin/password-members',undefined,session)).status,403);
- assert.equal((await call('/auth/change-password',{currentPassword:temporaryPassword,newPassword:'short'},session,me.csrf)).status,400);
+ assert.equal((await call('/auth/change-password',{currentPassword:temporaryPassword,newPassword:'123'},session,me.csrf)).status,400);
  const permanent='My new long passphrase 456';assert.equal((await call('/auth/change-password',{currentPassword:temporaryPassword,newPassword:permanent},session,me.csrf)).status,200);
  assert.equal((await call('/me',undefined,session)).status,401);
  assert.equal((await call('/auth/password',{memberId:'LCR-TEST-001',password:temporaryPassword})).status,401);
  const again=await call('/auth/password',{memberId:'LCR-TEST-001',password:permanent});assert.equal(again.status,200);const session2=tokenOf(again);assert.equal((await (await call('/me',undefined,session2)).json()).profile.id,'LCR-TEST-001');
- assert.equal((await call('/admin/reset-password',{identityId:'member'},admin,'admin-csrf')).status,200);assert.equal((await call('/me',undefined,session2)).status,401);
+ assert.equal((await call('/admin/reset-password',{identityId:'member',password:'4826'},admin,'admin-csrf')).status,200);assert.equal((await call('/me',undefined,session2)).status,401);
  assert.equal(db.sql.prepare("SELECT count(*) n FROM audit_log WHERE action='password_reset'").get().n,2);
 });
-test('expired temporary credentials, inactive and unknown members denied; per-account throttling enforced',async()=>{const {db,call,admin,env}=await setup();const r=await call('/admin/reset-password',{identityId:'member'},admin,'admin-csrf'),p=(await r.json()).temporaryPassword;
+test('expired temporary credentials, inactive and unknown members denied; per-account throttling enforced',async()=>{const {db,call,admin,env}=await setup();const r=await call('/admin/reset-password',{identityId:'member',password:'4826'},admin,'admin-csrf'),p='4826';assert.equal(r.status,200);
  db.sql.exec('UPDATE member_passwords SET temporary_expires=0');assert.equal((await call('/auth/password',{memberId:'LCR-TEST-001',password:p})).status,401);
  db.sql.exec('UPDATE member_passwords SET temporary_expires=9999999999; UPDATE identities SET active=0 WHERE id=\'member\'');assert.equal((await call('/auth/password',{memberId:'LCR-TEST-001',password:p})).status,401);
  for(let i=0;i<8;i++)assert.equal((await call('/auth/password',{memberId:'UNKNOWN-001',password:p})).status,401);
@@ -41,8 +41,10 @@ test('expired temporary credentials, inactive and unknown members denied; per-ac
 });
 test('reset storage failure gives an actionable code without exposing credentials or partial changes',async()=>{
  const {db,call,admin}=await setup();db.sql.exec('DROP TABLE audit_log');
- const result=await call('/admin/reset-password',{identityId:'member'},admin,'admin-csrf');assert.equal(result.status,503);
+ const result=await call('/admin/reset-password',{identityId:'member',password:'4826'},admin,'admin-csrf');assert.equal(result.status,503);
  const data=await result.json();assert(data.error.startsWith('RESET_STORAGE_FAILED:'));assert.equal(data.temporaryPassword,undefined);assert.equal(db.sql.prepare('SELECT count(*) n FROM member_passwords').get().n,0);assert.equal((await call('/me',undefined,admin)).status,200);
 });
 
 test('legacy password verification and parameter tampering remain bounded',async()=>{const password='Legacy verification password 123',salt='a'.repeat(64),hash=pbkdf2Sync(password,salt,600000,32,'sha256').toString('hex');assert(await verifyPassword(password,`pbkdf2-sha256$600000$${salt}$${hash}`));const current=await hashPassword(password);assert(!await verifyPassword(password,current.replace('16384','1073741824')))});
+
+test('admin supplies password: minimum four characters, no automatic fallback or plaintext response',async()=>{const {call,admin}=await setup();for(const password of [undefined,'','123'])assert.equal((await call('/admin/reset-password',{identityId:'member',password},admin,'admin-csrf')).status,400);const r=await call('/admin/reset-password',{identityId:'member',password:'2468'},admin,'admin-csrf');assert.equal(r.status,200);assert(!JSON.stringify(await r.json()).includes('2468'));const login=await call('/auth/password',{memberId:'LCR-TEST-001',password:'2468'});assert.equal(login.status,200);const session=tokenOf(login),me=await (await call('/me',undefined,session)).json();assert.equal((await call('/auth/change-password',{currentPassword:'2468',newPassword:'1357'},session,me.csrf)).status,200);assert.equal((await call('/auth/password',{memberId:'LCR-TEST-001',password:'1357'})).status,200)});
