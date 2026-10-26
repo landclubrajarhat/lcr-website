@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 export function database() {
   const sql = new DatabaseSync(':memory:');
   sql.exec(readFileSync(new URL('../migrations/0001_member_portal.sql',import.meta.url),'utf8'));
+  sql.exec(readFileSync(new URL('../migrations/0002_member_passwords.sql',import.meta.url),'utf8'));
   return {
     sql,
     prepare(query) {

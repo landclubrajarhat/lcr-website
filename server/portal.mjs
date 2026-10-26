@@ -1,3 +1,4 @@
+import { hashPassword, verifyPassword, validPassword } from './password.mjs';
 import { verifyGoogle, randomToken, digest, cookie, setCookie } from './auth.mjs';
 
 export const PUBLIC_FIELDS = ['id','fullName','profession','designation','organization','bio','photoId','revision'];
@@ -21,11 +22,12 @@ async function rate(db,key,max,period=60) {
   const r=await db.prepare('INSERT INTO rate_limits(key,count,expires) VALUES(?,1,?) ON CONFLICT(key) DO UPDATE SET count=count+1 RETURNING count').bind(k,(bucket+2)*period).first();
   if(r.count>max)fail(429,'অনেকবার চেষ্টা হয়েছে। কিছুক্ষণ পরে চেষ্টা করুন।');
 }
-async function actor(request,db,mutation=false) {
+async function actor(request,db,mutation=false,passwordEnabled=false) {
   const token=cookie(request,'__Host-lcr-session');if(!/^[a-f0-9]{64}$/.test(token))fail(401,'আগে Login করুন।');
   const user=await db.prepare('SELECT i.*,s.csrf FROM sessions s JOIN identities i ON i.id=s.identity_id WHERE s.token_hash=? AND s.expires>? AND i.active=1').bind(await digest(token),now()).first();
   if(!user)fail(401,'আবার Login করুন।');
   if(mutation&&request.headers.get('X-LCR-CSRF')!==user.csrf)fail(403,'অনুরোধটি যাচাই করা যায়নি।');
+  if(passwordEnabled){const credential=await db.prepare('SELECT must_change FROM member_passwords WHERE identity_id=?').bind(user.id).first();user.must_change=credential?.must_change===1;user.has_password=!!credential;}
   return user;
 }
 export function validateProfile(data) {
@@ -52,12 +54,12 @@ export function imageBytes(data) {
 export async function handleRequest(request,env,{verifyIdentity=verifyGoogle}={}) {
   try {
     const url=new URL(request.url),path=url.pathname.replace(/^\/api/,'');
-    if(env.MEMBER_PORTAL_ENABLED!=='true'||!env.LCR_DB||!env.GOOGLE_CLIENT_ID||!env.APP_ORIGIN)fail(503,'Member Portal এখনো চালু করা হয়নি।');
+    if(env.MEMBER_PORTAL_ENABLED!=='true'||!env.LCR_DB||!env.APP_ORIGIN)fail(503,'Member Portal এখনো চালু করা হয়নি।');
     if(url.origin!==env.APP_ORIGIN)fail(403,'এই ঠিকানায় Portal অনুমোদিত নয়।');
     if(!['GET','POST'].includes(request.method))fail(405,'এই method অনুমোদিত নয়।');
     if(request.method==='POST'&&request.headers.get('Origin')!==env.APP_ORIGIN)fail(403,'অনুরোধের উৎস মেলেনি।');
-    const db=env.LCR_DB;
-    if(path==='/config'&&request.method==='GET')return json({clientId:env.GOOGLE_CLIENT_ID});
+    const db=env.LCR_DB,passwordEnabled=env.MEMBER_PASSWORD_ENABLED==='true';
+    if(path==='/config'&&request.method==='GET')return json({clientId:env.GOOGLE_CLIENT_ID||null,passwordEnabled});
     if(path==='/profiles'&&request.method==='GET'){
       const {results}=await db.prepare('SELECT id,full_name,profession,designation,organization,bio,photo_id,revision FROM members WHERE published=1 ORDER BY id LIMIT 100').all();
       return json({profiles:results.map(publicProfile)});
@@ -69,6 +71,7 @@ export async function handleRequest(request,env,{verifyIdentity=verifyGoogle}={}
       return json({nonce},200,{'Set-Cookie':setCookie('__Host-lcr-login',nonce,300)});
     }
     if(path==='/auth/google'&&request.method==='POST'){
+      if(!env.GOOGLE_CLIENT_ID)fail(404,'Google Login চালু নেই।');
       await rate(db,'login:'+await digest(request.headers.get('CF-Connecting-IP')||'local'),12);
       const {credential}=await body(request);if(typeof credential!=='string'||credential.length>12000)fail(400,'Login token প্রয়োজন।');
       const nonce=cookie(request,'__Host-lcr-login');
@@ -87,21 +90,48 @@ export async function handleRequest(request,env,{verifyIdentity=verifyGoogle}={}
       await db.prepare('INSERT INTO sessions VALUES(?,?,?,?)').bind(await digest(token),user.id,csrf,now()+3600).run();
       return json({ok:true},200,{'Set-Cookie':setCookie('__Host-lcr-session',token,3600)});
     }
+    if(path==='/auth/password'&&request.method==='POST'){
+      if(!passwordEnabled)fail(404,'Password Login চালু নেই।');
+      await rate(db,'password-ip:'+await digest(request.headers.get('CF-Connecting-IP')||'local'),20,900);
+      const data=await body(request),memberId=typeof data.memberId==='string'?data.memberId.trim().toUpperCase():'';
+      if(!/^[A-Z0-9-]{3,40}$/.test(memberId)||typeof data.password!=='string'||data.password.length>512)fail(400,'Member ID ও password দিন।');
+      await rate(db,'password-member:'+await digest(memberId),8,900);
+      const identity=await db.prepare('SELECT i.*,p.password_hash,p.must_change,p.temporary_expires FROM identities i JOIN member_passwords p ON p.identity_id=i.id WHERE i.member_id=? AND i.active=1').bind(memberId).first();
+      const verified=await verifyPassword(data.password,identity?.password_hash);
+      if(!verified||!identity||identity.must_change&&identity.temporary_expires<=now())fail(401,'Member ID বা password সঠিক নয়, অথবা অস্থায়ী password-এর মেয়াদ শেষ।');
+      const token=randomToken(),csrf=randomToken();
+      const result=await db.prepare('INSERT INTO sessions SELECT ?,i.id,?,? FROM identities i JOIN member_passwords p ON p.identity_id=i.id WHERE i.id=? AND i.active=1 AND p.password_hash=?').bind(await digest(token),csrf,now()+3600,identity.id,identity.password_hash).run();
+      if(!result.meta.changes)fail(401,'আবার Login করুন।');
+      return json({ok:true},200,{'Set-Cookie':setCookie('__Host-lcr-session',token,3600)});
+    }
     const mediaMatch=path.match(/^\/media\/([a-f0-9-]{36})$/);
     if(mediaMatch&&request.method==='GET'){
       const media=await db.prepare('SELECT * FROM media WHERE id=?').bind(mediaMatch[1]).first();if(!media)fail(404,'ছবি পাওয়া যায়নি।');
       const published=await db.prepare('SELECT id FROM members WHERE photo_id=? AND published=1').bind(media.id).first();
-      if(!published){const user=await actor(request,db);if(user.role!=='admin'&&user.member_id!==media.member_id)fail(403,'ছবিটি ব্যক্তিগত।')}
+      if(!published){const user=await actor(request,db,false,passwordEnabled);if(user.must_change)fail(403,'আগে password পরিবর্তন করুন।');if(user.role!=='admin'&&user.member_id!==media.member_id)fail(403,'ছবিটি ব্যক্তিগত।')}
       return new Response(media.bytes,{headers:{'Content-Type':media.mime,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Content-Security-Policy':"default-src 'none'; sandbox"}});
     }
-    const user=await actor(request,db,request.method==='POST');
+    const user=await actor(request,db,request.method==='POST',passwordEnabled);
+    if(user.must_change&&!['/me','/auth/change-password','/auth/logout'].includes(path))fail(403,'আগে password পরিবর্তন করুন।');
     if(path==='/me'&&request.method==='GET'){
+      if(user.must_change)return json({role:user.role,email:user.email,csrf:user.csrf,mustChangePassword:true,profile:null,submission:null});
       const member=user.member_id?await db.prepare('SELECT * FROM members WHERE id=?').bind(user.member_id).first():null;
       const latest=user.member_id?await db.prepare('SELECT * FROM submissions WHERE member_id=? ORDER BY submitted_at DESC,rowid DESC LIMIT 1').bind(user.member_id).first():null;
-      return json({role:user.role,email:user.email,csrf:user.csrf,profile:member?ownProfile(member):null,submission:latest?{...ownProfile({...latest,id:user.member_id,revision:latest.base_revision}),status:latest.status,reason:latest.reason}:null});
+      return json({role:user.role,email:user.email,csrf:user.csrf,mustChangePassword:false,passwordEnabled,hasPassword:!!user.has_password,profile:member?ownProfile(member):null,submission:latest?{...ownProfile({...latest,id:user.member_id,revision:latest.base_revision}),status:latest.status,reason:latest.reason}:null});
     }
     if(path==='/auth/logout'&&request.method==='POST'){
       await db.prepare('DELETE FROM sessions WHERE token_hash=?').bind(await digest(cookie(request,'__Host-lcr-session'))).run();
+      return json({ok:true},200,{'Set-Cookie':setCookie('__Host-lcr-session','',0)});
+    }
+    if(path==='/auth/change-password'&&request.method==='POST'){
+      if(!passwordEnabled)fail(404,'Password Login চালু নেই।');
+      await rate(db,'password-change:'+user.id,5,900);const data=await body(request);
+      if(!validPassword(data.newPassword)||data.newPassword===data.currentPassword)fail(400,'নতুন আলাদা password ৪–১২৮ অক্ষরের হতে হবে।');
+      const old=await db.prepare('SELECT * FROM member_passwords WHERE identity_id=?').bind(user.id).first();
+      if(!await verifyPassword(data.currentPassword,old?.password_hash)||!old||old.must_change&&old.temporary_expires<=now())fail(401,'বর্তমান password সঠিক নয় অথবা মেয়াদ শেষ।');
+      const encoded=await hashPassword(data.newPassword);
+      const result=await db.prepare('UPDATE member_passwords SET password_hash=?,must_change=0,temporary_expires=NULL,updated_at=? WHERE identity_id=? AND password_hash=?').bind(encoded,now(),user.id,old.password_hash).run();
+      if(!result.meta.changes)fail(409,'Password বদলেছে। আবার Login করুন।');
       return json({ok:true},200,{'Set-Cookie':setCookie('__Host-lcr-session','',0)});
     }
     if(path==='/me/photo'&&request.method==='POST'){
@@ -124,6 +154,33 @@ export async function handleRequest(request,env,{verifyIdentity=verifyGoogle}={}
       const {results}=await db.prepare("SELECT * FROM submissions WHERE status='pending' ORDER BY submitted_at LIMIT 100").all();
       const submissions=[];for(const row of results){const m=await db.prepare('SELECT * FROM members WHERE id=?').bind(row.member_id).first();submissions.push({id:row.id,memberId:row.member_id,submittedAt:row.submitted_at,before:ownProfile(m),after:ownProfile({...row,id:row.member_id,revision:row.base_revision})})}
       return json({submissions});
+    }
+    if(path==='/admin/password-members'&&request.method==='GET'){
+      if(!passwordEnabled)fail(404,'Password Login চালু নেই।');
+      const {results}=await db.prepare("SELECT i.id,i.member_id,m.full_name,p.must_change FROM identities i JOIN members m ON m.id=i.member_id LEFT JOIN member_passwords p ON p.identity_id=i.id WHERE i.active=1 AND i.role='member' ORDER BY i.member_id LIMIT 100").all();
+      return json({members:results.map(r=>({identityId:r.id,memberId:r.member_id,fullName:r.full_name,passwordSet:r.must_change!==null}))});
+    }
+    if(path==='/admin/reset-password'&&request.method==='POST'){
+      if(!passwordEnabled)fail(404,'Password Login চালু নেই।');
+      await rate(db,'password-reset:'+user.id,10,900);const data=await body(request);
+      if(typeof data.identityId!=='string'||data.identityId.length>100)fail(400,'সদস্য নির্বাচন করুন।');
+      const target=await db.prepare("SELECT id,member_id FROM identities WHERE id=? AND role='member' AND active=1").bind(data.identityId).first();
+      if(!target)fail(404,'সদস্য পাওয়া যায়নি।');
+      if(!validPassword(data.password))fail(400,'Password কমপক্ষে ৪ এবং সর্বোচ্চ ১২৮ অক্ষরের হতে হবে।');
+      const temporaryPassword=data.password;let encoded;
+      try{encoded=await hashPassword(temporaryPassword)}catch(error){
+        // These fixed categories disclose no password, salt, hash or raw exception.
+        const detail=String(error?.message||'');
+        const code=/not implemented|not supported|is not a function/i.test(detail)?'HASH_RUNTIME_UNSUPPORTED':/memory|maxmem/i.test(detail)?'HASH_MEMORY_LIMIT':'HASH_DERIVATION_FAILED';
+        fail(503,code+': Password তৈরি হয়নি। এই error code দিয়ে Admin-এর সহায়তা নিন।');
+      }
+      try{await db.batch([
+        db.prepare('INSERT INTO member_passwords(identity_id,password_hash,must_change,temporary_expires,updated_at) VALUES(?,?,1,?,?) ON CONFLICT(identity_id) DO UPDATE SET password_hash=excluded.password_hash,must_change=1,temporary_expires=excluded.temporary_expires,updated_at=excluded.updated_at').bind(target.id,encoded,now()+86400,now()),
+        db.prepare('INSERT INTO audit_log VALUES(?,?,?,?,?)').bind(crypto.randomUUID(),user.id,'password_reset',target.id,now())
+      ])}catch{
+        fail(503,'RESET_STORAGE_FAILED: Password সংরক্ষণ হয়নি। Database table ও trigger পরীক্ষা প্রয়োজন।');
+      }
+      return json({memberId:target.member_id,ok:true,expiresInHours:24});
     }
     const review=path.match(/^\/admin\/submissions\/([a-f0-9-]{36})$/);
     if(review&&request.method==='POST'){
