@@ -6,7 +6,7 @@ Members can use their Member ID without signing into Google. Existing profile ow
 
 1. Keep `MEMBER_PASSWORD_ENABLED=false` or unset while preparing.
 2. Apply `migrations/0002_member_passwords.sql` once to `lcr-members-test`. The dashboard may require running CREATE TABLE and the two complete CREATE TRIGGER statements separately. Never split a trigger body at its internal semicolon. Verify all three objects exist, including `password_insert_revoke` and `password_update_revoke`.
-3. Test project runtime needs `nodejs_compat` (explicitly enable it for the build/runtime). The password module uses native `node:crypto` PBKDF2-HMAC-SHA256, 600,000 iterations, unique 32-byte salt and 32-byte hash. Do not reduce the work factor to work around a runtime error. Static output remains `public`, build `npm run build`.
+3. Test project runtime needs `nodejs_compat` (explicitly enable it for the build/runtime). The password module uses native `node:crypto` scrypt (N=16384, r=8, p=5, maxmem=32 MiB), unique 32-byte salt and 32-byte hash. Do not reduce the work factor to work around a runtime error. Static output remains `public`, build `npm run build`.
 4. Deploy the password branch to the test project only after review. Keep `APP_ORIGIN=https://lcr-website-test.pages.dev`, existing `LCR_DB`, Google configuration and `MEMBER_PORTAL_ENABLED=true`. Set `MEMBER_PASSWORD_ENABLED=true` after migration. Main is not part of this change.
 5. Sign in as the existing Google admin. Under Admin Review, use the member password controls to create the dummy member's temporary password. The account must already be an active member identity with a member record. No self-enrollment or arbitrary role changes are exposed.
 6. Share the temporary password only with that member using a private channel. It appears once in the response, is cleared from the page after two minutes, expires in 24 hours, and is never logged or stored as plaintext. Do not put it in GitHub, screenshots, or this setup file.
@@ -26,4 +26,10 @@ Members can use their Member ID without signing into Google. Existing profile ow
 
 ## Verification performed
 
-14 Node tests pass with real SQLite and native password hashing. Static allowlist build and Pages Functions bundle pass with `nodejs_compat`. A separate local workerd/Miniflare smoke check successfully derives a 600,000-iteration key using native node:crypto. Wrangler dev's ordinary server startup hit an environment network-interface error; Miniflare bypassed that launcher problem. Hosted CPU budget, browser layout and deployed end-to-end workflow still require verification; local emulation cannot establish hosted limits.
+16 Node tests pass with real SQLite and native password hashing. Static allowlist build and Pages Functions bundle pass with `nodejs_compat`. A separate local workerd/Miniflare smoke check successfully derives a 600,000-iteration key using native node:crypto. Wrangler dev's ordinary server startup hit an environment network-interface error; Miniflare bypassed that launcher problem. Hosted CPU budget, browser layout and deployed end-to-end workflow still require verification; local emulation cannot establish hosted limits.
+
+## Hosted hashing correction
+
+Hosted reset reported RESET_HASH_FAILED even after selecting Wrangler 4. New password hashes use native scrypt with OWASP's 16 MiB profile rather than relying on high-iteration PBKDF2. Existing PBKDF2 records are recognized for compatibility; if that runtime rejects legacy verification, admin must issue a new scrypt temporary password. The exact previous runtime exception was not exposed, so an iteration limit is a hypothesis, not an established root cause. There is no migration of member or identity data. Native hashes are encoded from bytes rather than assuming Buffer.toString(hex). Hosted reset/change/login must still be checked.
+
+The corrected bundled password module passed a workerd/Miniflare smoke test for scrypt generation, correct and wrong password verification, and byte-for-byte interoperability with Node scrypt. Node tests also cover legacy verification and rejection of tampered work factors.

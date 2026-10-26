@@ -167,8 +167,11 @@ export async function handleRequest(request,env,{verifyIdentity=verifyGoogle}={}
       const target=await db.prepare("SELECT id,member_id FROM identities WHERE id=? AND role='member' AND active=1").bind(data.identityId).first();
       if(!target)fail(404,'সদস্য পাওয়া যায়নি।');
       const temporaryPassword=randomToken().slice(0,24);let encoded;
-      try{encoded=await hashPassword(temporaryPassword)}catch{
-        fail(503,'RESET_HASH_FAILED: Password তৈরির crypto service কাজ করছে না। Admin-কে এই code জানান।');
+      try{encoded=await hashPassword(temporaryPassword)}catch(error){
+        // These fixed categories disclose no password, salt, hash or raw exception.
+        const detail=String(error?.message||'');
+        const code=/not implemented|not supported|is not a function/i.test(detail)?'HASH_RUNTIME_UNSUPPORTED':/memory|maxmem/i.test(detail)?'HASH_MEMORY_LIMIT':'HASH_DERIVATION_FAILED';
+        fail(503,code+': Password তৈরি হয়নি। এই error code দিয়ে Admin-এর সহায়তা নিন।');
       }
       try{await db.batch([
         db.prepare('INSERT INTO member_passwords(identity_id,password_hash,must_change,temporary_expires,updated_at) VALUES(?,?,1,?,?) ON CONFLICT(identity_id) DO UPDATE SET password_hash=excluded.password_hash,must_change=1,temporary_expires=excluded.temporary_expires,updated_at=excluded.updated_at').bind(target.id,encoded,now()+86400,now()),

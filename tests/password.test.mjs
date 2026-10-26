@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { database } from './d1.mjs';
 import { handleRequest } from '../server/portal.mjs';
 import { hashPassword,verifyPassword } from '../server/password.mjs';
+import { pbkdf2Sync } from 'node:crypto';
 import { digest } from '../server/auth.mjs';
 const origin='https://test.example.invalid';
 async function setup(){const db=database(),env={LCR_DB:db,MEMBER_PORTAL_ENABLED:'true',MEMBER_PASSWORD_ENABLED:'true',APP_ORIGIN:origin};
@@ -11,7 +12,7 @@ async function setup(){const db=database(),env={LCR_DB:db,MEMBER_PORTAL_ENABLED:
  const call=(path,data,session='',csrf='',foreign=false)=>handleRequest(new Request(origin+'/api'+path,{method:data===undefined?'GET':'POST',headers:{'Content-Type':'application/json',Origin:foreign?'https://evil.invalid':origin,Cookie:'__Host-lcr-session='+session,'X-LCR-CSRF':csrf},...(data===undefined?{}:{body:JSON.stringify(data)})}),env);
  return {db,env,call,admin:token};}
 const tokenOf=r=>r.headers.get('Set-Cookie').split(';')[0].split('=')[1];
-test('password hashes use unique salt, verify correctly, reject malformed and long inputs',async()=>{const p='A long secret passphrase 123';const a=await hashPassword(p),b=await hashPassword(p);assert.notEqual(a,b);assert(await verifyPassword(p,a));assert(!await verifyPassword('wrong',a));assert(!await verifyPassword(p,'invalid'));assert(!await verifyPassword('a'.repeat(129),a));await assert.rejects(hashPassword('short'))});
+test('password hashes use unique salt, verify correctly, reject malformed and long inputs',async()=>{const p='A long secret passphrase 123';const a=await hashPassword(p),b=await hashPassword(p);assert.notEqual(a,b);assert(a.startsWith('scrypt$16384$8$5$'));assert(await verifyPassword(p,a));assert(!await verifyPassword('wrong',a));assert(!await verifyPassword(p,'invalid'));assert(!await verifyPassword('a'.repeat(129),a));await assert.rejects(hashPassword('short'))});
 test('admin-only reset -> forced change -> own profile -> reset revokes sessions; Google is optional',async()=>{
  const {db,call,admin}=await setup();const list=await call('/admin/password-members',undefined,admin);assert.equal(list.status,200);assert.equal((await list.json()).members[0].memberId,'LCR-TEST-001');
  assert.equal((await call('/admin/reset-password',{identityId:'member'})).status,401);
@@ -43,3 +44,5 @@ test('reset storage failure gives an actionable code without exposing credential
  const result=await call('/admin/reset-password',{identityId:'member'},admin,'admin-csrf');assert.equal(result.status,503);
  const data=await result.json();assert(data.error.startsWith('RESET_STORAGE_FAILED:'));assert.equal(data.temporaryPassword,undefined);assert.equal(db.sql.prepare('SELECT count(*) n FROM member_passwords').get().n,0);assert.equal((await call('/me',undefined,admin)).status,200);
 });
+
+test('legacy password verification and parameter tampering remain bounded',async()=>{const password='Legacy verification password 123',salt='a'.repeat(64),hash=pbkdf2Sync(password,salt,600000,32,'sha256').toString('hex');assert(await verifyPassword(password,`pbkdf2-sha256$600000$${salt}$${hash}`));const current=await hashPassword(password);assert(!await verifyPassword(password,current.replace('16384','1073741824')))});
