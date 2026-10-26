@@ -15,7 +15,9 @@
   async function directory(){const data=await api('/profiles');$('publicDirectory').replaceChildren(...data.profiles.map(renderProfile));if(!data.profiles.length)$('publicDirectory').append(node('p','এখনো কোনো প্রোফাইল প্রকাশ করা হয়নি।'))}
   function myPhoto(){const p=current?.profile;$('myPhoto').replaceChildren();if(photoId&&p)$('myPhoto').append(photo({...p,photoId}));if(preparedPhoto)$('myPhoto').append(node('p','নতুন ছবিটি প্রস্তুত; ফর্ম জমা দিলে upload হবে।'))}
   async function refresh(){
-    current=await api('/me');csrf=current.csrf;loaded=true;$('accountLabel').textContent=current.email;$('logout').hidden=false;$('loginButton').hidden=true;
+    current=await api('/me');csrf=current.csrf;loaded=true;$('accountLabel').textContent=current.email;$('logout').hidden=false;$('loginButton').hidden=true;$('passwordLogin').hidden=true;
+    $('passwordPanel').hidden=!current.mustChangePassword&&!current.hasPassword;
+    if(current.mustChangePassword){$('myPanel').hidden=true;$('reviewPanel').hidden=true;notice('প্রথমে অস্থায়ী password পরিবর্তন করুন।');return}
     const member=current.profile,submission=current.submission;
     $('myPanel').hidden=!member;$('reviewPanel').hidden=current.role!=='admin';
     if(member){const draft=submission&&submission.status!=='approved'?submission:member;
@@ -25,8 +27,22 @@
       $('reviewReason').textContent=submission?.status==='returned'?'পর্যালোচকের মন্তব্য: '+submission.reason:'';
       form.querySelectorAll('input:not([readonly]),textarea,button').forEach(n=>n.disabled=waiting);myPhoto();
     }
-    if(current.role==='admin')await reviews();
+    if(current.role==='admin'){await reviews();if(current.passwordEnabled)await passwordMembers()}
   }
+  async function passwordMembers(){
+    const {members}=await api('/admin/password-members');$('passwordAdmin').hidden=false;
+    $('passwordMembers').replaceChildren();
+    for(const member of members){const row=node('p'),button=node('button',member.passwordSet?'Password Reset':'অস্থায়ী Password তৈরি','subtle');button.type='button';
+      button.addEventListener('click',async()=>{if(!confirm(member.memberId+'-এর password তৈরি/reset করবেন? পুরোনো session বন্ধ হবে।'))return;button.disabled=true;$('temporaryPassword').textContent='';
+        try{const result=await api('/admin/reset-password',{method:'POST',body:JSON.stringify({identityId:member.identityId})});$('temporaryPassword').textContent=result.memberId+' · অস্থায়ী password: '+result.temporaryPassword+' · মেয়াদ ২৪ ঘণ্টা। ব্যক্তিগতভাবে দিন।';$('hideTemporary').hidden=false;setTimeout(()=>{$('temporaryPassword').textContent='';$('hideTemporary').hidden=true},120000)}catch(e){notice(e.message)}finally{button.disabled=false}});
+      row.append(node('span',member.memberId+' · '+member.fullName+' '),button);$('passwordMembers').append(row);
+    }
+  }
+  $('hideTemporary').addEventListener('click',()=>{$('temporaryPassword').textContent='';$('hideTemporary').hidden=true});
+  $('passwordLogin').addEventListener('submit',async event=>{event.preventDefault();const f=event.currentTarget,b=f.querySelector('button');b.disabled=true;
+    try{await api('/auth/password',{method:'POST',body:JSON.stringify({memberId:f.elements.memberId.value,password:f.elements.password.value})});f.reset();await refresh();notice(current.mustChangePassword?'আগে অস্থায়ী password পরিবর্তন করুন।':'Login সম্পন্ন হয়েছে।')}catch(e){notice(e.message)}finally{f.elements.password.value='';b.disabled=false}});
+  $('passwordChange').addEventListener('submit',async event=>{event.preventDefault();const f=event.currentTarget,b=f.querySelector('button');if(f.elements.newPassword.value!==f.elements.confirmPassword.value){notice('নতুন password দুটি মেলেনি।');return}b.disabled=true;
+    try{await api('/auth/change-password',{method:'POST',body:JSON.stringify({currentPassword:f.elements.currentPassword.value,newPassword:f.elements.newPassword.value})});f.reset();location.reload()}catch(e){notice(e.message)}finally{b.disabled=false}});
   async function reviews(){const {submissions}=await api('/admin/submissions'),root=$('pendingReviews');root.replaceChildren();if(!submissions.length)root.append(node('p','কোনো জমা পর্যালোচনার অপেক্ষায় নেই।'));
     for(const item of submissions){const card=node('article',undefined,'review-card');card.append(node('h3',item.memberId));const table=node('table'),head=node('tr');['তথ্য','বর্তমান','প্রস্তাবিত'].forEach(t=>head.append(node('th',t)));table.append(head);
       for(const [key,label] of Object.entries({fullName:'নাম',mobile:'মোবাইল · ব্যক্তিগত',profession:'পেশা',designation:'পদবি',organization:'প্রতিষ্ঠান',bio:'পরিচিতি'})){const row=node('tr');row.append(node('th',label),node('td',item.before[key]||'—'),node('td',item.after[key]||'—'));table.append(row)}
@@ -53,6 +69,6 @@
     google.accounts.id.initialize({client_id:clientId,nonce:challenge.nonce,auto_select:false,callback:async response=>{try{await api('/auth/google',{method:'POST',body:JSON.stringify({credential:response.credential})});await refresh();notice('Login সম্পন্ন হয়েছে।')}catch(e){notice(e.message+' আবার চেষ্টা করতে পেজটি রিফ্রেশ করুন।')}}});
     google.accounts.id.renderButton($('loginButton'),{theme:'outline',size:'large',text:'signin_with'});
   }
-  async function start(){try{const config=await api('/config');await directory();try{await refresh()}catch(e){if(loaded)throw e;await startLogin(config.clientId)}notice('নিজের অনুমোদিত Google Account দিয়ে Login করুন।')}catch(e){notice(e.message)}}
+  async function start(){try{const config=await api('/config');await directory();try{await refresh();notice(current.mustChangePassword?'প্রথমে অস্থায়ী password পরিবর্তন করুন।':'আপনার Account-এ Login করা আছে।')}catch(e){if(loaded)throw e;$('passwordLogin').hidden=!config.passwordEnabled;if(config.clientId){try{await startLogin(config.clientId)}catch(googleError){if(!config.passwordEnabled)throw googleError}}notice(config.passwordEnabled?'Member ID ও password দিয়ে Login করুন।':'নিজের অনুমোদিত Google Account দিয়ে Login করুন।')}}catch(e){notice(e.message)}}
   start();
 })();
