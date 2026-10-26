@@ -24,3 +24,6 @@ Home, About, Governance, Project Concepts, 20 Dummy Member Profiles, Proposed Pr
 
 ## Deployment
 This folder can be deployed as a static site to Cloudflare Pages, GitHub Pages or Netlify. Do not publish real member personal/financial data in static source files.
+
+## Member profile prototype (Phase 1)
+Open `profile-demo.html` for public profiles, simulated member editing and admin review using dummy data only. This is a browser-memory workflow prototype: no Google login, backend, durable uploads or export. Do not enter real information or private images. Refresh or Reset clears edits. Proposed fields, permissions and next phases: [docs/member-profile-plan.md](docs/member-profile-plan.md).
