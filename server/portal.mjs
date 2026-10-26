@@ -166,11 +166,16 @@ export async function handleRequest(request,env,{verifyIdentity=verifyGoogle}={}
       if(typeof data.identityId!=='string'||data.identityId.length>100)fail(400,'সদস্য নির্বাচন করুন।');
       const target=await db.prepare("SELECT id,member_id FROM identities WHERE id=? AND role='member' AND active=1").bind(data.identityId).first();
       if(!target)fail(404,'সদস্য পাওয়া যায়নি।');
-      const temporaryPassword=randomToken().slice(0,24),encoded=await hashPassword(temporaryPassword);
-      await db.batch([
+      const temporaryPassword=randomToken().slice(0,24);let encoded;
+      try{encoded=await hashPassword(temporaryPassword)}catch{
+        fail(503,'RESET_HASH_FAILED: Password তৈরির crypto service কাজ করছে না। Admin-কে এই code জানান।');
+      }
+      try{await db.batch([
         db.prepare('INSERT INTO member_passwords(identity_id,password_hash,must_change,temporary_expires,updated_at) VALUES(?,?,1,?,?) ON CONFLICT(identity_id) DO UPDATE SET password_hash=excluded.password_hash,must_change=1,temporary_expires=excluded.temporary_expires,updated_at=excluded.updated_at').bind(target.id,encoded,now()+86400,now()),
         db.prepare('INSERT INTO audit_log VALUES(?,?,?,?,?)').bind(crypto.randomUUID(),user.id,'password_reset',target.id,now())
-      ]);
+      ])}catch{
+        fail(503,'RESET_STORAGE_FAILED: Password সংরক্ষণ হয়নি। Database table ও trigger পরীক্ষা প্রয়োজন।');
+      }
       return json({memberId:target.member_id,temporaryPassword,expiresInHours:24});
     }
     const review=path.match(/^\/admin\/submissions\/([a-f0-9-]{36})$/);

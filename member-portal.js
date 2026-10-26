@@ -33,8 +33,8 @@
     const {members}=await api('/admin/password-members');$('passwordAdmin').hidden=false;
     $('passwordMembers').replaceChildren();
     for(const member of members){const row=node('p'),button=node('button',member.passwordSet?'Password Reset':'অস্থায়ী Password তৈরি','subtle');button.type='button';
-      button.addEventListener('click',async()=>{if(!confirm(member.memberId+'-এর password তৈরি/reset করবেন? পুরোনো session বন্ধ হবে।'))return;button.disabled=true;$('temporaryPassword').textContent='';
-        try{const result=await api('/admin/reset-password',{method:'POST',body:JSON.stringify({identityId:member.identityId})});$('temporaryPassword').textContent=result.memberId+' · অস্থায়ী password: '+result.temporaryPassword+' · মেয়াদ ২৪ ঘণ্টা। ব্যক্তিগতভাবে দিন।';$('hideTemporary').hidden=false;setTimeout(()=>{$('temporaryPassword').textContent='';$('hideTemporary').hidden=true},120000)}catch(e){notice(e.message)}finally{button.disabled=false}});
+      button.addEventListener('click',async()=>{if(!confirm(member.memberId+'-এর password তৈরি/reset করবেন? পুরোনো session বন্ধ হবে।'))return;button.disabled=true;button.textContent='Password তৈরি হচ্ছে…';$('temporaryPassword').textContent='Password তৈরি হচ্ছে…';$('hideTemporary').hidden=true;
+        try{const result=await api('/admin/reset-password',{method:'POST',body:JSON.stringify({identityId:member.identityId})});$('temporaryPassword').textContent=result.memberId+' · অস্থায়ী password: '+result.temporaryPassword+' · মেয়াদ ২৪ ঘণ্টা। ব্যক্তিগতভাবে দিন।';$('hideTemporary').hidden=false;setTimeout(()=>{$('temporaryPassword').textContent='';$('hideTemporary').hidden=true},120000);button.textContent='Password Reset'}catch(e){$('temporaryPassword').textContent=e.message;notice(e.message)}finally{button.disabled=false;button.textContent=member.passwordSet?'Password Reset':'অস্থায়ী Password তৈরি'}});
       row.append(node('span',member.memberId+' · '+member.fullName+' '),button);$('passwordMembers').append(row);
     }
   }

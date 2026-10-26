@@ -38,3 +38,8 @@ test('expired temporary credentials, inactive and unknown members denied; per-ac
  assert.equal((await call('/auth/password',{memberId:'UNKNOWN-001',password:p})).status,429);
  env.MEMBER_PASSWORD_ENABLED='false';assert.equal((await call('/auth/password',{memberId:'LCR-TEST-001',password:p})).status,404);
 });
+test('reset storage failure gives an actionable code without exposing credentials or partial changes',async()=>{
+ const {db,call,admin}=await setup();db.sql.exec('DROP TABLE audit_log');
+ const result=await call('/admin/reset-password',{identityId:'member'},admin,'admin-csrf');assert.equal(result.status,503);
+ const data=await result.json();assert(data.error.startsWith('RESET_STORAGE_FAILED:'));assert.equal(data.temporaryPassword,undefined);assert.equal(db.sql.prepare('SELECT count(*) n FROM member_passwords').get().n,0);assert.equal((await call('/me',undefined,admin)).status,200);
+});
