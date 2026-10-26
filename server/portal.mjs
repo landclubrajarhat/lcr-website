@@ -106,10 +106,12 @@ export async function handleRequest(request,env,{verifyIdentity=verifyGoogle}={}
     }
     const mediaMatch=path.match(/^\/media\/([a-f0-9-]{36})$/);
     if(mediaMatch&&request.method==='GET'){
-      const media=await db.prepare('SELECT * FROM media WHERE id=?').bind(mediaMatch[1]).first();if(!media)fail(404,'ছবি পাওয়া যায়নি।');
+      const media=await db.prepare('SELECT id,member_id,mime,hex(bytes) AS bytes_hex FROM media WHERE id=?').bind(mediaMatch[1]).first();if(!media)fail(404,'ছবি পাওয়া যায়নি।');
       const published=await db.prepare('SELECT id FROM members WHERE photo_id=? AND published=1').bind(media.id).first();
       if(!published){const user=await actor(request,db,false,passwordEnabled);if(user.must_change)fail(403,'আগে password পরিবর্তন করুন।');if(user.role!=='admin'&&user.member_id!==media.member_id)fail(403,'ছবিটি ব্যক্তিগত।')}
-      return new Response(media.bytes,{headers:{'Content-Type':media.mime,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Content-Security-Policy':"default-src 'none'; sandbox"}});
+      const bytes=Uint8Array.from(media.bytes_hex.match(/.{2}/g)||[],pair=>parseInt(pair,16));
+      if(!bytes.length)fail(404,'ছবির file খালি। নতুন ছবি upload করুন।');
+      return new Response(bytes,{headers:{'Content-Type':media.mime,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Content-Security-Policy':"default-src 'none'; sandbox"}});
     }
     const user=await actor(request,db,request.method==='POST',passwordEnabled);
     if(user.must_change&&!['/me','/auth/change-password','/auth/logout'].includes(path))fail(403,'আগে password পরিবর্তন করুন।');

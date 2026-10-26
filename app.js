@@ -8,7 +8,7 @@ async function loadApprovedProfiles(){
   if(!response.ok)throw new Error('Profiles unavailable');
   const data=await response.json();
   if(!Array.isArray(data.profiles))throw new Error('Invalid profiles');
-  count.textContent=`${data.profiles.length} APPROVED PROFILES`;
+  if(count)count.textContent=`${data.profiles.length} APPROVED PROFILES`;
   grid.replaceChildren();
   for(const profile of data.profiles){
    const card=document.createElement('article');card.className='member';
@@ -26,7 +26,7 @@ async function loadApprovedProfiles(){
   }
   if(!data.profiles.length){message.textContent='এখনো কোনো পরিচিতি প্রকাশ করা হয়নি।';grid.append(message);}
  }catch(error){
-  count.textContent='APPROVED PROFILES';message.textContent='পরিচিতি লোড করা যায়নি।';
+  if(count)count.textContent='APPROVED PROFILES';message.textContent='পরিচিতি লোড করা যায়নি।';
   const retry=document.createElement('button');retry.type='button';retry.textContent='আবার চেষ্টা করুন';retry.addEventListener('click',loadApprovedProfiles);
   grid.replaceChildren(message,retry);
  }
