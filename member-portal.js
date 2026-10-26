@@ -13,7 +13,14 @@
   function photo(profile){const n=node('img',undefined,'portrait');n.src='/api/media/'+encodeURIComponent(profile.photoId);n.alt=profile.fullName||'প্রোফাইল ছবি';return n}
   function renderProfile(profile){const card=node('article',undefined,'profile-card');if(profile.photoId)card.append(photo(profile));card.append(node('h3',profile.fullName),node('p',profile.id));for(const key of ['profession','designation','organization','bio'])if(profile[key])card.append(node('p',profile[key]));return card}
   async function directory(){const data=await api('/profiles');$('publicDirectory').replaceChildren(...data.profiles.map(renderProfile));if(!data.profiles.length)$('publicDirectory').append(node('p','এখনো কোনো প্রোফাইল প্রকাশ করা হয়নি।'))}
-  function myPhoto(){const p=current?.profile;$('myPhoto').replaceChildren();if(photoId&&p)$('myPhoto').append(photo({...p,photoId}));if(preparedPhoto)$('myPhoto').append(node('p','নতুন ছবিটি প্রস্তুত; ফর্ম জমা দিলে upload হবে।'))}
+  function preview(){
+    if(!current?.profile)return;const profile={id:current.profile.id,photoId};for(const key of ['fullName','profession','designation','organization','bio'])profile[key]=form.elements.namedItem(key).value;
+    const card=renderProfile(profile);if(preparedPhoto){card.querySelector('img')?.remove();const img=node('img',undefined,'portrait');img.src='data:'+preparedPhoto.mime+';base64,'+preparedPhoto.base64;img.alt='নতুন প্রোফাইল ছবি';card.prepend(img)}
+    $('previewCard').replaceChildren(card);$('profilePreview').hidden=false;$('previewStatus').textContent=current.submission?.status==='pending'?'জমা দেওয়া পরিচিতি · পর্যালোচনাধীন। ভুল থাকলে উপরের সংশোধন button ব্যবহার করুন।':'আপনার বর্তমান ফর্মের Preview · লিখলে সঙ্গে সঙ্গে বদলাবে।';
+  }
+  form.addEventListener('input',preview);
+  $('editPending').addEventListener('click',async()=>{const button=$('editPending');button.disabled=true;try{await api('/me/submissions/withdraw',{method:'POST',body:JSON.stringify({submissionId:current.submission.submissionId})});await refresh();notice('এখন ভুল সংশোধন করে আবার জমা দিন।');form.elements.fullName.focus()}catch(e){notice(e.message)}finally{button.disabled=false}});
+  function myPhoto(){const p=current?.profile;$('myPhoto').replaceChildren();if(photoId&&p)$('myPhoto').append(photo({...p,photoId}));if(preparedPhoto)$('myPhoto').append(node('p','নতুন ছবিটি প্রস্তুত; ফর্ম জমা দিলে upload হবে।'));preview()}
   async function refresh(){
     current=await api('/me');csrf=current.csrf;loaded=true;$('accountLabel').textContent=current.email;$('logout').hidden=false;$('loginButton').hidden=true;$('passwordLogin').hidden=true;
     $('passwordPanel').hidden=!current.mustChangePassword&&!current.hasPassword;
@@ -25,7 +32,7 @@
       form.elements.email.value=current.email;form.elements.photo.value='';form.elements.consent.checked=false;photoId=draft.photoId;preparedPhoto=null;
       const waiting=submission?.status==='pending';$('myStatus').textContent=waiting?'পর্যালোচনাধীন':submission?.status==='returned'?'সংশোধন প্রয়োজন':'তথ্য সম্পাদনা করুন';
       $('reviewReason').textContent=submission?.status==='returned'?'পর্যালোচকের মন্তব্য: '+submission.reason:'';
-      form.querySelectorAll('input:not([readonly]),textarea,button').forEach(n=>n.disabled=waiting);myPhoto();
+      form.querySelectorAll('input:not([readonly]),textarea,button').forEach(n=>n.disabled=waiting);$('editPending').hidden=!waiting;myPhoto();preview();
     }
     if(current.role==='admin'){await reviews();if(current.passwordEnabled)await passwordMembers()}
   }
@@ -63,7 +70,7 @@
     const button=form.querySelector('[type=submit]');button.disabled=true;
     try{if(preparedPhoto){const result=await api('/me/photo',{method:'POST',body:JSON.stringify(preparedPhoto)});photoId=result.photoId;preparedPhoto=null}
       const data={};for(const key of ['fullName','mobile','profession','designation','organization','bio'])data[key]=form.elements.namedItem(key).value;
-      await api('/me/submissions',{method:'POST',body:JSON.stringify({...data,photoId,revision:current.profile.revision,consent:form.elements.consent.checked})});await refresh();notice('তথ্য জমা হয়েছে। অনুমোদন হলে প্রকাশিত হবে।');
+      await api('/me/submissions',{method:'POST',body:JSON.stringify({...data,photoId,revision:current.profile.revision,consent:form.elements.consent.checked})});await refresh();$('profilePreview').scrollIntoView({behavior:'smooth',block:'start'});notice('তথ্য জমা হয়েছে। নিচে Preview দেখুন; ভুল থাকলে সংশোধন করুন।');
     }catch(e){notice(e.message);button.disabled=false}
   });
   $('logout').addEventListener('click',async()=>{try{await api('/auth/logout',{method:'POST',body:'{}'});location.reload()}catch(e){notice(e.message)}});

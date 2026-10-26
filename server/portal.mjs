@@ -117,7 +117,7 @@ export async function handleRequest(request,env,{verifyIdentity=verifyGoogle}={}
       if(user.must_change)return json({role:user.role,email:user.email,csrf:user.csrf,mustChangePassword:true,profile:null,submission:null});
       const member=user.member_id?await db.prepare('SELECT * FROM members WHERE id=?').bind(user.member_id).first():null;
       const latest=user.member_id?await db.prepare('SELECT * FROM submissions WHERE member_id=? ORDER BY submitted_at DESC,rowid DESC LIMIT 1').bind(user.member_id).first():null;
-      return json({role:user.role,email:user.email,csrf:user.csrf,mustChangePassword:false,passwordEnabled,hasPassword:!!user.has_password,profile:member?ownProfile(member):null,submission:latest?{...ownProfile({...latest,id:user.member_id,revision:latest.base_revision}),status:latest.status,reason:latest.reason}:null});
+      return json({role:user.role,email:user.email,csrf:user.csrf,mustChangePassword:false,passwordEnabled,hasPassword:!!user.has_password,profile:member?ownProfile(member):null,submission:latest?{submissionId:latest.id,...ownProfile({...latest,id:user.member_id,revision:latest.base_revision}),status:latest.status,reason:latest.reason}:null});
     }
     if(path==='/auth/logout'&&request.method==='POST'){
       await db.prepare('DELETE FROM sessions WHERE token_hash=?').bind(await digest(cookie(request,'__Host-lcr-session'))).run();
@@ -140,6 +140,13 @@ export async function handleRequest(request,env,{verifyIdentity=verifyGoogle}={}
       const data=await body(request,300000),bytes=imageBytes(data),id=crypto.randomUUID();
       const uploaded=await db.prepare('INSERT INTO media SELECT ?,?,?,?,? WHERE (SELECT count(*) FROM media WHERE member_id=?)<8').bind(id,user.member_id,data.mime,bytes.buffer,now(),user.member_id).run();
       if(!uploaded.meta.changes)fail(409,'ছবির সীমা পূর্ণ। admin-এর সাহায্য নিন।');return json({photoId:id},201);
+    }
+    if(path==='/me/submissions/withdraw'&&request.method==='POST'){
+      if(!user.member_id)fail(403,'সদস্য প্রোফাইল প্রয়োজন।');
+      const data=await body(request);if(typeof data.submissionId!=='string'||!/^[a-f0-9-]{36}$/.test(data.submissionId))fail(400,'সঠিক জমা নির্বাচন করুন।');
+      const changed=await db.prepare("UPDATE submissions SET status='returned',reason='সদস্য নিজে সংশোধনের জন্য ফিরিয়ে নিয়েছেন।',reviewer_id=?,reviewed_at=? WHERE id=? AND member_id=? AND status='pending'").bind(user.id,now(),data.submissionId,user.member_id).run();
+      if(!changed.meta.changes)fail(409,'জমাটি ইতোমধ্যে পর্যালোচনা হয়েছে। পেজটি আবার খুলুন।');
+      return json({ok:true});
     }
     if(path==='/me/submissions'&&request.method==='POST'){
       if(!user.member_id)fail(403,'সদস্য প্রোফাইল প্রয়োজন।');await rate(db,'submit:'+user.id,6);
