@@ -1,0 +1,137 @@
+import { verifyGoogle, randomToken, digest, cookie, setCookie } from './auth.mjs';
+
+export const PUBLIC_FIELDS = ['id','fullName','profession','designation','organization','bio','photoId','revision'];
+export const publicProfile = row => ({id:row.id,fullName:row.full_name,profession:row.profession,designation:row.designation,organization:row.organization,bio:row.bio,photoId:row.photo_id,revision:row.revision});
+const ownProfile = row => ({...publicProfile(row),mobile:row.mobile});
+class Problem extends Error { constructor(status, message) { super(message); this.status = status; } }
+const fail = (status,message) => { throw new Problem(status,message); };
+const json = (data,status=200,extra={}) => Response.json(data,{status,headers:{'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer',...extra}});
+const now = () => Math.floor(Date.now()/1000);
+async function body(request,limit=16384) {
+  if (!request.headers.get('content-type')?.startsWith('application/json')) fail(415,'JSON প্রয়োজন।');
+  if (Number(request.headers.get('content-length'))>limit) fail(413,'তথ্যের আকার বেশি।');
+  const reader=request.body?.getReader(); if(!reader) fail(400,'তথ্য পাওয়া যায়নি।');
+  let size=0, chunks=[];
+  while(true){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;if(size>limit){await reader.cancel();fail(413,'তথ্যের আকার বেশি।')}chunks.push(value)}
+  const all=new Uint8Array(size);let offset=0;for(const chunk of chunks){all.set(chunk,offset);offset+=chunk.length}
+  try{return JSON.parse(new TextDecoder().decode(all))}catch{fail(400,'তথ্যের বিন্যাস সঠিক নয়।')}
+}
+async function rate(db,key,max,period=60) {
+  const bucket=Math.floor(now()/period), k=`${key}:${bucket}`;
+  const r=await db.prepare('INSERT INTO rate_limits(key,count,expires) VALUES(?,1,?) ON CONFLICT(key) DO UPDATE SET count=count+1 RETURNING count').bind(k,(bucket+2)*period).first();
+  if(r.count>max)fail(429,'অনেকবার চেষ্টা হয়েছে। কিছুক্ষণ পরে চেষ্টা করুন।');
+}
+async function actor(request,db,mutation=false) {
+  const token=cookie(request,'__Host-lcr-session');if(!/^[a-f0-9]{64}$/.test(token))fail(401,'আগে Login করুন।');
+  const user=await db.prepare('SELECT i.*,s.csrf FROM sessions s JOIN identities i ON i.id=s.identity_id WHERE s.token_hash=? AND s.expires>? AND i.active=1').bind(await digest(token),now()).first();
+  if(!user)fail(401,'আবার Login করুন।');
+  if(mutation&&request.headers.get('X-LCR-CSRF')!==user.csrf)fail(403,'অনুরোধটি যাচাই করা যায়নি।');
+  return user;
+}
+export function validateProfile(data) {
+  if(!data||typeof data!=='object'||Array.isArray(data))fail(400,'প্রোফাইল প্রয়োজন।');
+  const allowed=['fullName','mobile','profession','designation','organization','bio','photoId','revision','consent'];
+  if(Object.keys(data).some(k=>!allowed.includes(k)))fail(400,'অনুমোদিত নয় এমন তথ্য রয়েছে।');
+  const out={};for(const [key,max] of Object.entries({fullName:80,mobile:11,profession:80,designation:80,organization:120,bio:500})){
+    if(typeof data[key]!=='string'||data[key].trim().length>max)fail(400,'তথ্যের দৈর্ঘ্য বা ধরন সঠিক নয়।');out[key]=data[key].trim();
+  }
+  if(!out.fullName||!out.profession)fail(400,'নাম ও পেশা পূরণ করুন।');
+  if(out.mobile&&!/^01[0-9]{9}$/.test(out.mobile))fail(400,'মোবাইল নম্বর সঠিক নয়।');
+  if(data.consent!==true||!Number.isSafeInteger(data.revision)||data.revision<0)fail(400,'সম্মতি ও সঠিক revision প্রয়োজন।');
+  if(data.photoId!==null&&(typeof data.photoId!=='string'||!/^[a-f0-9-]{36}$/.test(data.photoId)))fail(400,'ছবির পরিচিতি সঠিক নয়।');
+  return {...out,photoId:data.photoId,revision:data.revision};
+}
+export function imageBytes(data) {
+  if(!data||!['image/png','image/jpeg','image/webp'].includes(data.mime)||typeof data.base64!=='string'||data.base64.length>280000)fail(400,'JPEG, PNG বা WebP ছবি দিন।');
+  let bytes;try{bytes=Uint8Array.from(atob(data.base64),c=>c.charCodeAt(0))}catch{fail(400,'ছবির তথ্য সঠিক নয়।')}
+  if(bytes.length<16||bytes.length>204800)fail(413,'ছবি সর্বোচ্চ ২০০ KB হতে হবে।');
+  const start=Array.from(bytes.slice(0,12)),ascii=new TextDecoder('ascii').decode(bytes.slice(0,12));
+  const valid=data.mime==='image/png'?start.slice(0,8).join(',')==='137,80,78,71,13,10,26,10':data.mime==='image/jpeg'?start[0]===255&&start[1]===216&&start[2]===255:ascii.startsWith('RIFF')&&ascii.slice(8)==='WEBP';
+  if(!valid)fail(400,'ছবির format মেলেনি।');return bytes;
+}
+export async function handleRequest(request,env,{verifyIdentity=verifyGoogle}={}) {
+  try {
+    const url=new URL(request.url),path=url.pathname.replace(/^\/api/,'');
+    if(env.MEMBER_PORTAL_ENABLED!=='true'||!env.LCR_DB||!env.GOOGLE_CLIENT_ID||!env.APP_ORIGIN)fail(503,'Member Portal এখনো চালু করা হয়নি।');
+    if(url.origin!==env.APP_ORIGIN)fail(403,'এই ঠিকানায় Portal অনুমোদিত নয়।');
+    if(!['GET','POST'].includes(request.method))fail(405,'এই method অনুমোদিত নয়।');
+    if(request.method==='POST'&&request.headers.get('Origin')!==env.APP_ORIGIN)fail(403,'অনুরোধের উৎস মেলেনি।');
+    const db=env.LCR_DB;
+    if(path==='/config'&&request.method==='GET')return json({clientId:env.GOOGLE_CLIENT_ID});
+    if(path==='/profiles'&&request.method==='GET'){
+      const {results}=await db.prepare('SELECT id,full_name,profession,designation,organization,bio,photo_id,revision FROM members WHERE published=1 ORDER BY id LIMIT 100').all();
+      return json({profiles:results.map(publicProfile)});
+    }
+    if(path==='/auth/challenge'&&request.method==='POST'){
+      await rate(db,'login:'+await digest(request.headers.get('CF-Connecting-IP')||'local'),12);
+      await db.batch([db.prepare('DELETE FROM challenges WHERE expires<?').bind(now()),db.prepare('DELETE FROM sessions WHERE expires<?').bind(now()),db.prepare('DELETE FROM rate_limits WHERE expires<?').bind(now())]);
+      const nonce=randomToken();await db.prepare('INSERT INTO challenges VALUES(?,?)').bind(await digest(nonce),now()+300).run();
+      return json({nonce},200,{'Set-Cookie':setCookie('__Host-lcr-login',nonce,300)});
+    }
+    if(path==='/auth/google'&&request.method==='POST'){
+      await rate(db,'login:'+await digest(request.headers.get('CF-Connecting-IP')||'local'),12);
+      const {credential}=await body(request);if(typeof credential!=='string'||credential.length>12000)fail(400,'Login token প্রয়োজন।');
+      const nonce=cookie(request,'__Host-lcr-login');
+      if(!/^[a-f0-9]{64}$/.test(nonce))fail(401,'নতুন করে Login শুরু করুন।');
+      const challenge=await db.prepare('DELETE FROM challenges WHERE token_hash=? AND expires>? RETURNING token_hash').bind(await digest(nonce),now()).first();
+      if(!challenge)fail(401,'Login মেয়াদ শেষ হয়েছে।');
+      let claims;try{claims=await verifyIdentity(credential,env.GOOGLE_CLIENT_ID,nonce)}catch{fail(401,'Google পরিচয় যাচাই হয়নি।')}
+      let user=await db.prepare('SELECT * FROM identities WHERE google_sub=? AND active=1').bind(claims.sub).first();
+      if(!user){
+        // Email enrollment is allowed only for Google-authoritative addresses preapproved by admin.
+        if(!(claims.email.endsWith('@gmail.com')||claims.hd))fail(403,'এই Google Account আগে admin-কে যুক্ত করতে হবে।');
+        user=await db.prepare('UPDATE identities SET google_sub=? WHERE lower(email)=? AND google_sub IS NULL AND active=1 RETURNING *').bind(claims.sub,claims.email.toLowerCase()).first();
+      }
+      if(!user)fail(403,'এই Account-এর সদস্যপদ অনুমোদিত নয়।');
+      const token=randomToken(),csrf=randomToken();
+      await db.prepare('INSERT INTO sessions VALUES(?,?,?,?)').bind(await digest(token),user.id,csrf,now()+3600).run();
+      return json({ok:true},200,{'Set-Cookie':setCookie('__Host-lcr-session',token,3600)});
+    }
+    const mediaMatch=path.match(/^\/media\/([a-f0-9-]{36})$/);
+    if(mediaMatch&&request.method==='GET'){
+      const media=await db.prepare('SELECT * FROM media WHERE id=?').bind(mediaMatch[1]).first();if(!media)fail(404,'ছবি পাওয়া যায়নি।');
+      const published=await db.prepare('SELECT id FROM members WHERE photo_id=? AND published=1').bind(media.id).first();
+      if(!published){const user=await actor(request,db);if(user.role!=='admin'&&user.member_id!==media.member_id)fail(403,'ছবিটি ব্যক্তিগত।')}
+      return new Response(media.bytes,{headers:{'Content-Type':media.mime,'Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Content-Security-Policy':"default-src 'none'; sandbox"}});
+    }
+    const user=await actor(request,db,request.method==='POST');
+    if(path==='/me'&&request.method==='GET'){
+      const member=user.member_id?await db.prepare('SELECT * FROM members WHERE id=?').bind(user.member_id).first():null;
+      const latest=user.member_id?await db.prepare('SELECT * FROM submissions WHERE member_id=? ORDER BY submitted_at DESC,rowid DESC LIMIT 1').bind(user.member_id).first():null;
+      return json({role:user.role,email:user.email,csrf:user.csrf,profile:member?ownProfile(member):null,submission:latest?{...ownProfile({...latest,id:user.member_id,revision:latest.base_revision}),status:latest.status,reason:latest.reason}:null});
+    }
+    if(path==='/auth/logout'&&request.method==='POST'){
+      await db.prepare('DELETE FROM sessions WHERE token_hash=?').bind(await digest(cookie(request,'__Host-lcr-session'))).run();
+      return json({ok:true},200,{'Set-Cookie':setCookie('__Host-lcr-session','',0)});
+    }
+    if(path==='/me/photo'&&request.method==='POST'){
+      if(!user.member_id)fail(403,'সদস্য প্রোফাইল প্রয়োজন।');await rate(db,'photo:'+user.id,4);
+      const count=await db.prepare('SELECT count(*) AS n FROM media WHERE member_id=?').bind(user.member_id).first();if(count.n>=8)fail(409,'ছবির সীমা পূর্ণ। admin-এর সাহায্য নিন।');
+      const data=await body(request,300000),bytes=imageBytes(data),id=crypto.randomUUID();
+      const uploaded=await db.prepare('INSERT INTO media SELECT ?,?,?,?,? WHERE (SELECT count(*) FROM media WHERE member_id=?)<8').bind(id,user.member_id,data.mime,bytes.buffer,now(),user.member_id).run();
+      if(!uploaded.meta.changes)fail(409,'ছবির সীমা পূর্ণ। admin-এর সাহায্য নিন।');return json({photoId:id},201);
+    }
+    if(path==='/me/submissions'&&request.method==='POST'){
+      if(!user.member_id)fail(403,'সদস্য প্রোফাইল প্রয়োজন।');await rate(db,'submit:'+user.id,6);
+      const data=validateProfile(await body(request)),member=await db.prepare('SELECT revision FROM members WHERE id=?').bind(user.member_id).first();
+      if(!member||member.revision!==data.revision)fail(409,'প্রোফাইল বদলেছে। পেজটি আবার খুলুন।');
+      if(data.photoId&&!await db.prepare('SELECT id FROM media WHERE id=? AND member_id=?').bind(data.photoId,user.member_id).first())fail(403,'এই ছবিটি আপনার নয়।');
+      try{await db.prepare("INSERT INTO submissions(id,member_id,base_revision,full_name,mobile,profession,designation,organization,bio,photo_id,publication_consent,status,submitted_at) VALUES(?,?,?,?,?,?,?,?,?,?,1,'pending',?)").bind(crypto.randomUUID(),user.member_id,data.revision,data.fullName,data.mobile,data.profession,data.designation,data.organization,data.bio,data.photoId,now()).run()}catch(e){if(String(e).includes('UNIQUE'))fail(409,'আগের জমা এখনো পর্যালোচনাধীন।');throw e}
+      return json({ok:true},201);
+    }
+    if(user.role!=='admin')fail(403,'Admin অনুমতি প্রয়োজন।');
+    if(path==='/admin/submissions'&&request.method==='GET'){
+      const {results}=await db.prepare("SELECT * FROM submissions WHERE status='pending' ORDER BY submitted_at LIMIT 100").all();
+      const submissions=[];for(const row of results){const m=await db.prepare('SELECT * FROM members WHERE id=?').bind(row.member_id).first();submissions.push({id:row.id,memberId:row.member_id,submittedAt:row.submitted_at,before:ownProfile(m),after:ownProfile({...row,id:row.member_id,revision:row.base_revision})})}
+      return json({submissions});
+    }
+    const review=path.match(/^\/admin\/submissions\/([a-f0-9-]{36})$/);
+    if(review&&request.method==='POST'){
+      await rate(db,'review:'+user.id,20);const data=await body(request);
+      if(!['approved','returned'].includes(data.action)||typeof data.reason!=='string'||data.reason.length>300||data.action==='returned'&&!data.reason.trim())fail(400,'সঠিক সিদ্ধান্ত ও ফেরতের কারণ দিন।');
+      let changed;try{changed=await db.prepare("UPDATE submissions SET status=?,reason=?,reviewer_id=?,reviewed_at=? WHERE id=? AND status='pending'").bind(data.action,data.reason.trim(),user.id,now(),review[1]).run()}catch(e){if(String(e).includes('STALE_REVISION'))fail(409,'প্রোফাইল বদলেছে। জমাটি ফেরত দিন।');throw e}
+      if(changed.meta.changes===0)fail(409,'এই জমা আগেই পর্যালোচনা হয়েছে।');return json({ok:true});
+    }
+    fail(404,'পাওয়া যায়নি।');
+  }catch(error){return json({error:error instanceof Problem?error.message:'সেবা আপাতত পাওয়া যাচ্ছে না।'},error instanceof Problem?error.status:503)}
+}
