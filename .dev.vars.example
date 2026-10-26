@@ -1,0 +1,3 @@
+MEMBER_PORTAL_ENABLED=false
+APP_ORIGIN=https://replace-with-approved-preview-host
+GOOGLE_CLIENT_ID=replace-with-web-client-id.apps.googleusercontent.com
